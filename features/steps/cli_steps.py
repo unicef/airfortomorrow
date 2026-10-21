@@ -5,6 +5,7 @@ import os
 from typing import Iterable
 
 from behave import given, then, when
+from behave.configuration import Configuration
 
 
 def _require_last_result(context):
@@ -15,6 +16,14 @@ def _require_last_result(context):
 
 def _parse_exit_codes(raw_codes: str) -> Iterable[int]:
     return [int(value.strip()) for value in raw_codes.split(",") if value.strip()]
+
+
+@then('default test selection for tags "{tags}" should be "{selected}"')
+def step_default_test_selection(context, tags: str, selected: str):
+    actual = Configuration([]).tags.check(tags.split())
+    assert actual == (selected == "yes"), (
+        f"Default suite selection for {tags!r}: expected {selected}, got {actual}"
+    )
 
 
 @given('the environment variable "{name}" should equal "{value}"')

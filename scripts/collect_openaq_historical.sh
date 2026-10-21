@@ -71,6 +71,10 @@ OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
 TEST_MODE=false
 TIMEOUT="$DEFAULT_TIMEOUT"
 
+if [[ "${AIR_QUALITY_TEST_MODE:-0}" == "1" ]]; then
+    TEST_MODE=true
+fi
+
 # Function to log messages
 log() {
     echo "$(date +'%Y-%m-%d %H:%M:%S') $1" | tee -a "$LOG_FILE"

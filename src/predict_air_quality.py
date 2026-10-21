@@ -9,7 +9,7 @@ Includes sensor validation capabilities to compare predictions with real sensor 
 Usage:
     python src/predict_air_quality.py --mode realtime --countries THA LAO
     python src/predict_air_quality.py --mode historical --start-date 2024-06-01 --end-date 2024-06-03
-    python src/predict_air_quality.py --mode realtime --countries THA LAO --validate-sensors --generate-map
+    python src/predict_air_quality.py --mode historical --start-date 2024-06-01 --end-date 2024-06-03 --countries THA LAO --validate-sensors --generate-map
 """
 
 
@@ -923,7 +923,7 @@ Examples:
     
     # Sensor validation arguments
     parser.add_argument('--validate-sensors', action='store_true',
-                       help='Validate predictions against sensor measurements')
+                       help='Validate predictions against sensor measurements (historical mode only)')
     
     parser.add_argument('--enhanced-maps', action='store_true',
                        help='Generate enhanced maps showing both predictions and sensor data')
@@ -960,6 +960,9 @@ Examples:
     else:
         start_date = None
         end_date = None
+
+    if args.mode == "realtime" and args.validate_sensors:
+        parser.error("validate-sensors is not a valid option for realtime mode")
     
     logger.info("="*80)
     logger.info("AIR QUALITY PREDICTION SYSTEM STARTING")

@@ -167,9 +167,15 @@ class PipelineRunner:
     def _build_openaq_realtime_cmd(self, args):
         """Build command for OpenAQ real-time processing."""
         # OpenAQ scripts are hardcoded for Thailand/Laos, but we can pass days
-        return [
+        cmd = [
             str(self.pipelines['openaq']['realtime_script']),
             '--days', str(max(1, args.hours // 24))]
+        if getattr(args, 'test_mode', False):
+            cmd.extend([
+                '--test-mode',
+                '--limit', str(args.test_openaq_limit),
+            ])
+        return cmd
 
     def _build_openaq_historical_cmd(self, args):
         """Build command for OpenAQ historical processing."""
@@ -184,6 +190,8 @@ class PipelineRunner:
         # Add end year if different from start year
         if start_year != end_year:
             cmd.append(end_year)
+        if getattr(args, 'test_mode', False):
+            cmd.append('--test')
             
         return cmd
 
@@ -305,12 +313,17 @@ class PipelineRunner:
             
             # Execute command
             self.logger.info(f"Executing: {' '.join(cmd)}")
+            env = os.environ.copy()
+            if getattr(args, 'test_mode', False):
+                env['AIR_QUALITY_TEST_MODE'] = '1'
+                env['AIR_QUALITY_TEST_OPENAQ_LIMIT'] = str(args.test_openaq_limit)
             result = subprocess.run(
                 cmd,
                 cwd=self.script_dir,
                 capture_output=True,
                 text=True,
-                timeout=args.timeout if hasattr(args, 'timeout') else 3600
+                timeout=args.timeout if hasattr(args, 'timeout') else 3600,
+                env=env,
             )
             
             end_time = time.time()
@@ -605,6 +618,10 @@ def main():
                        help='Timeout for individual pipelines in seconds (default: 3600)')
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose output for pipelines that support it')
+    parser.add_argument('--test-mode', action='store_true',
+                       help='Enable bounded test mode for collectors')
+    parser.add_argument('--test-openaq-limit', type=int, default=5,
+                       help='OpenAQ location cap used with --test-mode (default: 5)')
     
     args = parser.parse_args()
     

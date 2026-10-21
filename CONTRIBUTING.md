@@ -17,9 +17,10 @@ Please read and follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before participa
 
 ## Testing
 
-1. Run tests with `./scripts/run_tests.sh -- -q`.
-2. Do not run `pytest` directly on the host; tests are Docker-only in this repository.
-3. Run `./scripts/smoke_test.sh` when you need to validate a fresh Docker build plus core dependency imports.
+1. Run BDD tests with `./scripts/run_behave_tests.sh`.
+2. Default runs exclude `@slow` and `@live`; use tags when needed (for example `./scripts/run_behave_tests.sh -- --tags=@contract`).
+3. Run `./scripts/smoke_test.sh` when you need to validate a fresh Docker build plus `@smoke` scenarios.
+4. Do not run test suites directly on the host; use Docker harness scripts.
 
 ## Security and Data Hygiene
 

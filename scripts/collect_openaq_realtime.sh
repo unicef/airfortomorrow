@@ -50,6 +50,14 @@ fi
 # Default values (config-driven with fallbacks)
 DAYS="$DEFAULT_DAYS"
 TIMEOUT="$DEFAULT_TIMEOUT"
+TEST_MODE=false
+LIMIT=""
+DEFAULT_TEST_LIMIT="${AIR_QUALITY_TEST_OPENAQ_LIMIT:-5}"
+
+if [[ "${AIR_QUALITY_TEST_MODE:-0}" == "1" ]]; then
+    TEST_MODE=true
+    LIMIT="$DEFAULT_TEST_LIMIT"
+fi
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -62,6 +70,17 @@ while [[ $# -gt 0 ]]; do
             TIMEOUT="$2"
             shift 2
             ;;
+        --limit)
+            LIMIT="$2"
+            shift 2
+            ;;
+        --test-mode)
+            TEST_MODE=true
+            if [[ -z "$LIMIT" ]]; then
+                LIMIT="$DEFAULT_TEST_LIMIT"
+            fi
+            shift
+            ;;
         --help)
             echo "OpenAQ Real-time Data Collection Script (Configuration-Aware)"
             echo ""
@@ -70,6 +89,8 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --days N           Number of days to collect (default: $DEFAULT_DAYS)"
             echo "  --timeout SECONDS  Processing timeout (default: ${DEFAULT_TIMEOUT}s)"
+            echo "  --limit N          Limit number of locations processed"
+            echo "  --test-mode        Enable bounded test mode (sets default --limit to $DEFAULT_TEST_LIMIT)"
             echo "  --help            Display this help message"
             echo ""
             echo "Configuration Integration:"
@@ -80,12 +101,13 @@ while [[ $# -gt 0 ]]; do
             echo "  Config system: $([[ "$CONFIG_AVAILABLE" == true ]] && echo "✅ Available" || echo "❌ Using fallbacks")"
             echo "  Default days: $DEFAULT_DAYS"
             echo "  Default timeout: ${DEFAULT_TIMEOUT}s"
+            echo "  Test mode default location limit: $DEFAULT_TEST_LIMIT"
             echo ""
             exit 0
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--days N] [--timeout SECONDS] [--help]"
+            echo "Usage: $0 [--days N] [--timeout SECONDS] [--limit N] [--test-mode] [--help]"
             exit 1
             ;;
     esac
@@ -94,6 +116,10 @@ done
 echo "Starting OpenAQ real-time data collection..."
 echo "Days to collect: $DAYS"
 echo "Timeout: ${TIMEOUT}s"
+echo "Test mode: $([ "$TEST_MODE" == true ] && echo "enabled" || echo "disabled")"
+if [[ -n "$LIMIT" ]]; then
+    echo "Location limit: $LIMIT"
+fi
 echo "Log file: $LOG_FILE"
 [[ "$CONFIG_AVAILABLE" == true ]] && echo "Configuration system: ✅ Available" || echo "Configuration system: ❌ Using fallbacks"
 
@@ -101,7 +127,15 @@ echo "Log file: $LOG_FILE"
 echo "$(date): Starting data collection" >> "$LOG_FILE"
 
 # Use the original sequential approach with openaq_realtime_client.py
-python -m src.data_processors.openaq_realtime_client --days "$DAYS" 2>&1 | tee -a "$LOG_FILE"
+PYTHON_CMD=(python -m src.data_processors.openaq_realtime_client --days "$DAYS")
+if [[ -n "$LIMIT" ]]; then
+    PYTHON_CMD+=(--limit "$LIMIT")
+fi
+if [[ "$TEST_MODE" == true ]]; then
+    PYTHON_CMD+=(--test-mode)
+fi
+
+"${PYTHON_CMD[@]}" 2>&1 | tee -a "$LOG_FILE"
 
 # Check if the script ran successfully
 if [ ${PIPESTATUS[0]} -eq 0 ]; then

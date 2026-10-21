@@ -8,6 +8,7 @@ It fetches data for each location for the past 2 days by default.
 
 import time
 import argparse
+import os
 from datetime import datetime, timedelta
 import pandas as pd
 from pandas import json_normalize
@@ -378,8 +379,27 @@ def main():
                         help="Limit the number of locations to process (default: no limit - process all)")
     parser.add_argument("--output", type=str, default="data/raw/openaq/realtime",
                         help="Directory to save output (default: data/raw/openaq/realtime)")
+    parser.add_argument("--test-mode", action="store_true",
+                        help="Enable bounded test mode for fast deterministic runs")
+    parser.add_argument("--test-limit", type=int, default=int(os.getenv("AIR_QUALITY_TEST_OPENAQ_LIMIT", "5")),
+                        help="Maximum locations processed in test mode (default: AIR_QUALITY_TEST_OPENAQ_LIMIT or 5)")
     args = parser.parse_args()
 
+    test_mode = args.test_mode or os.getenv("AIR_QUALITY_TEST_MODE") == "1"
+    if test_mode:
+        global MAX_WORKERS, BATCH_SIZE
+        MAX_WORKERS = 1
+        BATCH_SIZE = 5
+        args.days = min(args.days, 1)
+        if args.limit is None:
+            args.limit = args.test_limit
+        else:
+            args.limit = min(args.limit, args.test_limit)
+        print(
+            f"Running OpenAQ realtime client in test mode "
+            f"(days={args.days}, location_limit={args.limit}, workers={MAX_WORKERS}, batch_size={BATCH_SIZE})"
+        )
+    
     # Load environment variables from .env file if it exists
     env_path = Path('.env')
     if env_path.exists():

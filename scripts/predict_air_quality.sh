@@ -93,7 +93,7 @@ Prediction Options:
     --map-resolution RES     H3 resolution for maps (default: $DEFAULT_MAP_RESOLUTION)
 
 Sensor Validation Options:
-    --validate-sensors       Validate predictions against sensor measurements
+    --validate-sensors       Validate predictions against sensor measurements (historical mode only)
     --enhanced-maps          Generate enhanced maps showing both predictions and sensor data
     --save-validation        Save validation results to files
     --validation-output-dir  Directory to save validation outputs (default: data/validation)
@@ -123,11 +123,11 @@ Examples:
     # Use custom model file
     $0 --mode realtime --model-path /path/to/custom_model.json
 
-    # Realtime prediction with sensor validation
-    $0 --mode realtime --validate-sensors --save-validation
+    # Historical prediction with sensor validation
+    $0 --mode historical --start-date 2024-06-01 --end-date 2024-06-03 --validate-sensors --save-validation
 
-    # Enhanced prediction with maps and sensor validation
-    $0 --mode realtime --validate-sensors --enhanced-maps --save-validation
+    # Historical enhanced prediction with maps and sensor validation
+    $0 --mode historical --start-date 2024-06-01 --end-date 2024-06-03 --generate-map --validate-sensors --enhanced-maps --save-validation
 
 Configuration Status:
     Config system: $(command -v get_config_countries &> /dev/null && echo "✅ Available" || echo "❌ Using fallbacks")
@@ -211,6 +211,12 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Validate mode-specific argument combinations early.
+if [[ "$MODE" == "realtime" && "$VALIDATE_SENSORS" == true ]]; then
+    log_error "validate-sensors is not a valid option for realtime mode"
+    exit 2
+fi
 
 
 # Validate model file exists

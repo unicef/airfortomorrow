@@ -113,8 +113,10 @@ GENERATE_MAPS=true
 MAP_RESOLUTION="$DEFAULT_MAP_RESOLUTION"
 TIMEOUT="$DEFAULT_TIMEOUT"
 MAX_WORKERS="$DEFAULT_MAX_WORKERS"
+TEST_MODE=false
+TEST_OPENAQ_LIMIT=5
 
-# Sensor validation flags (enabled by default)
+# Sensor validation flags (historical mode defaults)
 VALIDATE_SENSORS=true
 ENHANCED_MAPS=true
 SAVE_VALIDATION=true
@@ -138,13 +140,15 @@ OPTIONS:
     -s, --start-date DATE Start date for historical mode (YYYY-MM-DD)
     -e, --end-date DATE   End date for historical mode (YYYY-MM-DD)
     -p, --parallel        Run data collection in parallel (experimental)
+    --test-mode           Enable bounded test mode for collectors
+    --test-openaq-limit N OpenAQ location cap when --test-mode is enabled (default: 5)
     --generate-maps       Generate prediction maps
     --map-resolution RES  H3 resolution for maps (default: from config)
     --skip-silver         Skip silver dataset generation
     --skip-prediction     Skip prediction phase
-    --no-sensor-validation  Disable sensor validation (enabled by default)
-    --no-enhanced-maps      Disable enhanced maps with sensor overlays (enabled by default)
-    --no-save-validation    Disable saving validation results (enabled by default)
+    --no-sensor-validation  Disable sensor validation (historical mode default: enabled)
+    --no-enhanced-maps      Disable enhanced maps with sensor overlays (historical mode default: enabled)
+    --no-save-validation    Disable saving validation results (historical mode default: enabled)
     --help                Show this help message
 
 EXAMPLES:
@@ -160,8 +164,12 @@ EXAMPLES:
     # Run only data collection and processing (skip prediction)
     $0 --mode realtime --skip-prediction
     
-    # Run without sensor validation (validation is enabled by default)
-    $0 --mode realtime --no-sensor-validation --no-enhanced-maps
+    # Run historical mode without sensor validation (validation is enabled by default)
+    $0 --mode historical --start-date 2024-01-01 --end-date 2024-01-31 --no-sensor-validation --no-enhanced-maps
+
+NOTES:
+    Sensor validation options are historical-mode only. In realtime mode,
+    --validate-sensors, --enhanced-maps, and --save-validation are not applied.
 
 CONFIGURATION:
 $(if [[ "$CONFIG_AVAILABLE" == true ]]; then
@@ -278,6 +286,16 @@ while [[ $# -gt 0 ]]; do
             PYTHON_ARGS="$PYTHON_ARGS --parallel"
             shift
             ;;
+        --test-mode)
+            TEST_MODE=true
+            PYTHON_ARGS="$PYTHON_ARGS --test-mode"
+            shift
+            ;;
+        --test-openaq-limit)
+            TEST_OPENAQ_LIMIT="$2"
+            PYTHON_ARGS="$PYTHON_ARGS --test-openaq-limit $2"
+            shift 2
+            ;;
         --verbose)
             PYTHON_ARGS="$PYTHON_ARGS --verbose"
             shift
@@ -293,6 +311,16 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Sensor validation features are historical-only.
+if [[ "$MODE" == "realtime" ]]; then
+    if [[ "$VALIDATE_SENSORS" == true || "$ENHANCED_MAPS" == true || "$SAVE_VALIDATION" == true ]]; then
+        log_info "Realtime mode detected: disabling historical-only sensor validation options"
+    fi
+    VALIDATE_SENSORS=false
+    ENHANCED_MAPS=false
+    SAVE_VALIDATION=false
+fi
 
 # Record pipeline start time
 PIPELINE_START_TIME=$(date +%s)
@@ -315,9 +343,16 @@ else
     log "  Execution mode: Sequential"
 fi
 log "  Generate maps: $([ "$GENERATE_MAPS" = true ] && echo "Yes (resolution $MAP_RESOLUTION)" || echo "No")"
-log "  Sensor validation: $([ "$VALIDATE_SENSORS" = true ] && echo "ENABLED" || echo "DISABLED")"
-log "  Enhanced maps: $([ "$ENHANCED_MAPS" = true ] && echo "ENABLED" || echo "DISABLED")"
-log "  Save validation: $([ "$SAVE_VALIDATION" = true ] && echo "ENABLED" || echo "DISABLED")"
+log "  Test mode: $([ "$TEST_MODE" = true ] && echo "ENABLED (OpenAQ limit: $TEST_OPENAQ_LIMIT)" || echo "DISABLED")"
+if [[ "$MODE" == "historical" ]]; then
+    log "  Sensor validation: $([ "$VALIDATE_SENSORS" = true ] && echo "ENABLED" || echo "DISABLED")"
+    log "  Enhanced maps: $([ "$ENHANCED_MAPS" = true ] && echo "ENABLED" || echo "DISABLED")"
+    log "  Save validation: $([ "$SAVE_VALIDATION" = true ] && echo "ENABLED" || echo "DISABLED")"
+else
+    log "  Sensor validation: N/A (historical mode only)"
+    log "  Enhanced maps: N/A (historical mode only)"
+    log "  Save validation: N/A (historical mode only)"
+fi
 echo "" | tee -a "$LOG_FILE"
 
 log "Pipeline steps:"

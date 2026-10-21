@@ -184,6 +184,16 @@ def step_current_run_has_component_logs(context):
     )
 
 
+@then('the current run logs should contain "{text}"')
+def step_current_run_logs_contain(context, text: str):
+    result = context.last_result
+    assert result is not None, "No command has been executed in this scenario."
+    assert any(
+        text in _resolve_path(context, path).read_text(encoding="utf-8", errors="replace")
+        for path in result.new_log_files
+    ), f"Text {text!r} not found in current run logs: {result.new_log_files}"
+
+
 @then("the current run logs should not contain authentication or credential failures")
 def step_current_run_logs_no_auth_failures(context):
     result = context.last_result
