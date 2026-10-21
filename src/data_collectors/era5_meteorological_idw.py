@@ -12,8 +12,11 @@ Supports both real-time and historical data collection modes.
 import argparse
 import logging
 import os
+import random
+import re
 import sys
 from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import warnings
@@ -21,6 +24,7 @@ from dotenv import load_dotenv
 import time
 from functools import reduce
 import io
+import threading
 import requests
 
 import earthkit.data as ekd
@@ -316,6 +320,7 @@ class ERA5MeteorologicalCollectorIDW:
 
         # Initialize rate limiting
         self._last_request_time = 0
+        self._rate_limit_lock = threading.Lock()
         self._rate_limit_config = self._get_rate_limiting_config()
         self.logger.info(f"Rate limiting configured: {self._rate_limit_config['requests_per_minute']} requests/minute")
     
@@ -346,49 +351,221 @@ class ERA5MeteorologicalCollectorIDW:
     
     def _rate_limit_wait(self):
         """Apply rate limiting delay between requests."""
-        if hasattr(self, '_last_request_time') and self._last_request_time > 0:
-            time_since_last = time.time() - self._last_request_time
-            delay_needed = self._rate_limit_config['delay_between_requests']
+        with self._rate_limit_lock:
+            if hasattr(self, '_last_request_time') and self._last_request_time > 0:
+                time_since_last = time.time() - self._last_request_time
+                delay_needed = self._rate_limit_config['delay_between_requests']
+                
+                if time_since_last < delay_needed:
+                    sleep_time = delay_needed - time_since_last
+                    self.logger.debug(f"Rate limiting: sleeping {sleep_time:.2f}s")
+                    time.sleep(sleep_time)
             
-            if time_since_last < delay_needed:
-                sleep_time = delay_needed - time_since_last
-                self.logger.debug(f"Rate limiting: sleeping {sleep_time:.2f}s")
-                time.sleep(sleep_time)
-        
-        self._last_request_time = time.time()
+            self._last_request_time = time.time()
+
+    @staticmethod
+    def _extract_status_code(error: Exception) -> Optional[int]:
+        """Best-effort extraction of HTTP status code from exception objects/messages."""
+        response = getattr(error, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+
+        for candidate in re.findall(r"\b([1-5]\d{2})\b", str(error)):
+            parsed = int(candidate)
+            if 100 <= parsed <= 599:
+                return parsed
+        return None
+
+    @staticmethod
+    def _extract_retry_after_seconds(error: Exception) -> Optional[float]:
+        """Read Retry-After/X-RateLimit-Reset headers when available."""
+        response = getattr(error, "response", None)
+        headers = getattr(response, "headers", None)
+        if not headers:
+            return None
+
+        retry_after = headers.get("Retry-After") or headers.get("retry-after")
+        if retry_after:
+            retry_after = str(retry_after).strip()
+            try:
+                return max(0.5, float(retry_after))
+            except ValueError:
+                try:
+                    reset_dt = parsedate_to_datetime(retry_after)
+                    wait_seconds = reset_dt.timestamp() - time.time()
+                    return max(0.5, wait_seconds)
+                except Exception:
+                    return None
+
+        reset_header = headers.get("X-RateLimit-Reset") or headers.get("x-ratelimit-reset")
+        if reset_header:
+            try:
+                reset_epoch = float(str(reset_header).strip())
+                wait_seconds = reset_epoch - time.time()
+                return max(0.5, wait_seconds)
+            except Exception:
+                return None
+
+        return None
+
+    def _classify_request_error(self, error: Exception) -> Dict[str, object]:
+        """Classify request errors to decide retry behavior."""
+        status_code = self._extract_status_code(error)
+        error_text = str(error).lower()
+
+        rate_limited = (
+            status_code == 429
+            or "too many requests" in error_text
+            or "rate limit" in error_text
+        )
+        not_found = (
+            status_code == 404
+            or "not found" in error_text
+            or "no such key" in error_text
+        )
+
+        retryable_status_codes = {408, 425, 429, 500, 502, 503, 504}
+        retryable_transport_markers = (
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "connection reset",
+            "connection aborted",
+            "network",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+        )
+        retryable_transport = any(
+            marker in error_text for marker in retryable_transport_markers
+        )
+
+        retryable = (
+            not not_found
+            and (
+                rate_limited
+                or (status_code in retryable_status_codes if status_code is not None else False)
+                or retryable_transport
+            )
+        )
+
+        return {
+            "status_code": status_code,
+            "rate_limited": rate_limited,
+            "not_found": not_found,
+            "retryable": retryable,
+        }
+
+    def _compute_backoff_wait_seconds(
+        self,
+        *,
+        attempt: int,
+        error: Exception,
+        classification: Dict[str, object],
+        base_delay_seconds: float,
+        backoff_factor: float,
+        max_delay_seconds: float,
+    ) -> float:
+        """Compute adaptive retry wait with header-aware 429 handling and jitter."""
+        if classification.get("rate_limited"):
+            retry_after = self._extract_retry_after_seconds(error)
+            if retry_after is not None:
+                return min(max_delay_seconds, retry_after)
+
+        exponential_wait = base_delay_seconds * (backoff_factor ** attempt)
+        jittered_wait = exponential_wait * random.uniform(0.8, 1.2)
+        return min(max_delay_seconds, max(0.5, jittered_wait))
+
+    def _execute_request_with_backoff(
+        self,
+        request_func,
+        *,
+        request_label: str,
+        max_retries: int,
+        base_delay_seconds: float,
+        backoff_factor: float,
+        max_delay_seconds: float,
+        apply_rate_limit_wait: bool = False,
+    ) -> Tuple[bool, Optional[object], str, Optional[Exception]]:
+        """
+        Execute request with bounded retries.
+
+        Returns:
+            Tuple of (success, result, failure_reason, last_error)
+        """
+        for attempt in range(max_retries + 1):
+            try:
+                if apply_rate_limit_wait:
+                    self._rate_limit_wait()
+                result = request_func()
+                return True, result, "success", None
+            except Exception as error:
+                classification = self._classify_request_error(error)
+                status_code = classification.get("status_code")
+
+                if classification.get("not_found"):
+                    self.logger.info(
+                        f"{request_label}: data not available yet (404/not found), skipping."
+                    )
+                    return False, None, "not_found", error
+
+                if not classification.get("retryable"):
+                    self.logger.error(
+                        f"{request_label}: non-retryable error"
+                        f"{f' (status={status_code})' if status_code else ''}: {error}"
+                    )
+                    return False, None, "non_retryable", error
+
+                if attempt >= max_retries:
+                    self.logger.error(
+                        f"{request_label}: max retries exceeded after {max_retries + 1} attempts"
+                        f"{f' (status={status_code})' if status_code else ''}: {error}"
+                    )
+                    return False, None, "max_retries_exceeded", error
+
+                wait_seconds = self._compute_backoff_wait_seconds(
+                    attempt=attempt,
+                    error=error,
+                    classification=classification,
+                    base_delay_seconds=base_delay_seconds,
+                    backoff_factor=backoff_factor,
+                    max_delay_seconds=max_delay_seconds,
+                )
+                attempt_label = f"{attempt + 1}/{max_retries + 1}"
+                reason = "429/rate-limit" if classification.get("rate_limited") else "transient error"
+                self.logger.warning(
+                    f"{request_label}: {reason}; retrying ({attempt_label}) in {wait_seconds:.2f}s"
+                    f"{f' [status={status_code}]' if status_code else ''}"
+                )
+                time.sleep(wait_seconds)
+
+        return False, None, "unknown", None
     
     def _make_rate_limited_request(self, request_func, *args, **kwargs):
         """Make a rate-limited request with retry logic."""
         max_retries = self._rate_limit_config['max_retries']
         backoff_factor = self._rate_limit_config['backoff_factor']
         retry_delay_base = self._rate_limit_config['retry_delay_base']
-        
-        for attempt in range(max_retries + 1):
-            try:
-                # Apply rate limiting
-                self._rate_limit_wait()
-                
-                # Make the request
-                result = request_func(*args, **kwargs)
-                return result
-                
-            except Exception as e:
-                error_str = str(e).lower()
-                
-                # Check if it's a rate limit error
-                if '429' in error_str or 'too many requests' in error_str or 'rate limit' in error_str:
-                    if attempt < max_retries:
-                        wait_time = retry_delay_base * (backoff_factor ** attempt)
-                        self.logger.warning(f"Rate limit exceeded (attempt {attempt + 1}/{max_retries + 1})")
-                        self.logger.info(f"Retrying in {wait_time:.1f} seconds...")
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        self.logger.error(f"Max retries exceeded for rate limiting")
-                        raise
-                else:
-                    # Non-rate-limit error, don't retry
-                    raise
+        max_delay_seconds = max(float(retry_delay_base), 300.0)
+
+        success, result, failure_reason, last_error = self._execute_request_with_backoff(
+            lambda: request_func(*args, **kwargs),
+            request_label="ERA5 API request",
+            max_retries=max_retries,
+            base_delay_seconds=float(retry_delay_base),
+            backoff_factor=float(backoff_factor),
+            max_delay_seconds=max_delay_seconds,
+            apply_rate_limit_wait=True,
+        )
+
+        if success:
+            return result
+
+        if last_error is not None:
+            raise last_error
+
+        raise RuntimeError(f"ERA5 API request failed with reason: {failure_reason}")
     
     def collect_historical_data(self, start_date: str, end_date: str) -> List[str]:
         """
@@ -708,61 +885,40 @@ class ERA5MeteorologicalCollectorIDW:
                 temp_dir.mkdir(parents=True, exist_ok=True)
                 
                 # Collect data for each past date
-                import time
                 for idx, date_str in enumerate(past_dates):
                     try:
                         self.logger.info(f"Retrieving {date_str} from AWS mirror... ({idx+1}/{len(past_dates)})")
-                        
-                        # Add delay between requests to avoid rate limiting (except for first request)
-                        if idx > 0:
-                            delay = 10  # 10 seconds between date requests to avoid AWS rate limiting
-                            self.logger.info(f"Waiting {delay}s before next request to avoid rate limiting...")
-                            time.sleep(delay)
-                        
+
                         # Download GRIB file from AWS
                         grib_file = temp_dir / f"ifs-{date_str}.grib2"
-                        
-                        # Retrieve data from AWS mirror with retry logic
+
+                        # Retrieve data from AWS mirror with adaptive retry/backoff.
+                        # No fixed inter-date sleep; we only wait when the server signals pressure/errors.
                         max_retries = 3
-                        retry_count = 0
-                        data_available = False
-                        
-                        while retry_count < max_retries:
-                            try:
-                                client.retrieve(
-                                    date=date_str,
-                                    time=0,  # 00Z run
-                                    stream="oper",  # Operational
-                                    type="fc",  # Forecast
-                                    step=list(range(0, 25, 6)),  # 0, 6, 12, 18, 24 hours (similar to ERA5)
-                                    param=params,
-                                    target=str(grib_file)
-                                )
-                                data_available = True
-                                break  # Success, exit retry loop
-                                
-                            except Exception as e:
-                                error_str = str(e)
-                                
-                                # Check if data doesn't exist (404) - don't retry, just skip this date
-                                if "404" in error_str or "Not Found" in error_str:
-                                    self.logger.info(f"Data not yet available for {date_str} (404 Not Found) - skipping")
-                                    break  # Exit retry loop, skip this date
-                                
-                                # For other errors (like 503 rate limiting), retry with backoff
-                                retry_count += 1
-                                if retry_count < max_retries:
-                                    wait_time = 30 * retry_count  # Exponential backoff: 30s, 60s, 90s
-                                    self.logger.warning(f"Retry {retry_count}/{max_retries} for {date_str} after error: {error_str[:100]}")
-                                    self.logger.info(f"Waiting {wait_time}s before retry...")
-                                    time.sleep(wait_time)
-                                else:
-                                    self.logger.error(f"Max retries exceeded for {date_str}: {error_str[:200]}")
-                                    break  # Exit retry loop after max retries
-                        
+                        success, _, failure_reason, _ = self._execute_request_with_backoff(
+                            lambda: client.retrieve(
+                                date=date_str,
+                                time=0,  # 00Z run
+                                stream="oper",  # Operational
+                                type="fc",  # Forecast
+                                step=list(range(0, 25, 6)),  # 0, 6, 12, 18, 24 hours (similar to ERA5)
+                                param=params,
+                                target=str(grib_file),
+                            ),
+                            request_label=f"AWS retrieve {date_str}",
+                            max_retries=max_retries,
+                            base_delay_seconds=2.0,
+                            backoff_factor=2.0,
+                            max_delay_seconds=90.0,
+                            apply_rate_limit_wait=False,
+                        )
+
                         # Skip processing if data wasn't successfully retrieved
-                        if not data_available:
-                            self.logger.warning(f"⚠️  Skipping {date_str} - data not available or download failed")
+                        if not success:
+                            if failure_reason != "not_found":
+                                self.logger.warning(
+                                    f"⚠️  Skipping {date_str} - data not available or download failed ({failure_reason})"
+                                )
                             continue
                         
                         self.logger.info(f"✅ Downloaded GRIB file: {grib_file.name}")
